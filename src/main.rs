@@ -10,11 +10,25 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
 use cortex_m::asm;
 use cortex_m_rt::entry;
 
+use nrf52840_hal as hal;
+use nrf52840_hal::prelude::*;
+use nrf52840_hal::gpio::Level;
+
 #[entry]
 fn main() -> ! {
-    asm::nop(); // To not have main optimize to abort in release mode, remove when you add code
+    let p = hal::pac::Peripherals::take().unwrap();
+    let core = hal::pac::CorePeripherals::take().unwrap();
+    let mut port0 = hal::gpio::p0::Parts::new(p.P0);
+
+    let mut delay = hal::Delay::new(core.SYST);
+
+    let mut led = port0.p0_06.into_push_pull_output(Level::Low);
+
 
     loop {
-        // your code goes here
+        led.set_high().unwrap();
+        delay.delay_ms(250_u16);
+        led.set_low().unwrap();
+        delay.delay_ms(250_u16); 
     }
 }

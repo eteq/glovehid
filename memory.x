@@ -1,10 +1,13 @@
-/* Linker script for the nRF52 - WITHOUT SOFT DEVICE */
-MEMORY
+/* Assuming https://github.com/adafruit/Adafruit_nRF52_Bootloader default bootloader with  softdevice S140 - i.e. https://learn.adafruit.com/introducing-the-adafruit-nrf52840-feather/hathach-memory-map*/
+MEMORY 
 {
   /* NOTE K = KiBi = 1024 bytes */
-  FLASH : ORIGIN = 0x00000000, LENGTH = 1024K
+  FLASH : ORIGIN = 0x27000, LENGTH = 792K
+  /* FLASH : ORIGIN = 0x00000000, LENGTH = 1024K /* WITHOUT SOFT DEVICE */
   RAM : ORIGIN = 0x20000000, LENGTH = 256K
+  /* RAM : ORIGIN = 0x20000000, LENGTH = 256K /* WITHOUT SOFT DEVICE */
 }
+
 
 /* This is where the call stack will be allocated. */
 /* The stack is of the full descending type. */
