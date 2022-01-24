@@ -27,7 +27,7 @@ def main(mountpoint=None, busid=None, sudomount=False, do_unmount=False, attachw
     if mountpoint is None:
         target_dir = uf2path.parent
 
-    isbipdlist_complproc = run('usbipd.exe wsl list', shell=True, capture_output=True)
+    isbipdlist_complproc = run('usbipd.exe wsl list', shell=True, capture_output=True, text=True)
     in_wsl = isbipdlist_complproc.returncode == 0
 
     if mountpoint is None:
@@ -36,21 +36,12 @@ def main(mountpoint=None, busid=None, sudomount=False, do_unmount=False, attachw
         else:
             raise OSError('no mountpoint specified and not in wsl')
 
-    if mountpoint.exists():
-        if mountpoint.is_dir():
-            print(f'Warning: mountpoint {mountpoint} already exists but we will be mounting into it')
-        else:
-            raise IOError(f'Mountpoint {moutpoint} exists and is not a directory')
-    else:
-        print(f'Making directory {mountpoint} to be a mountpoint')
-        mountpoint.mkdir()
-
     mounted = None
     if in_wsl:
         if busid is None:
             raise ValueError('busid must be given if in wsl')
 
-        for line in isbipdlist_complproc.stdout.decode().split('\n'):
+        for line in isbipdlist_complproc.stdout.split('\n'):
             if line.startswith(busid) and  'Attached -' in line:
                 print(f'Busid {busid} is already attached to wsl.  Skipping.')
                 break
@@ -63,7 +54,8 @@ def main(mountpoint=None, busid=None, sudomount=False, do_unmount=False, attachw
             print (f'Waiting {attachwait} seconds for local machine to catch up to attach')
             time.sleep(attachwait)
 
-        remote_busid_to_pidvid = parse_usbip_port(check_output('usbip port'.split(' ')).decode())
+        port_complproc = run('usbip port'.split(' '), check=True, capture_output=True, text=True)
+        remote_busid_to_pidvid = parse_usbip_port(port_complproc.stdout)
 
         usbdrivename = find_drivedevname_from_pidvid(remote_busid_to_pidvid[busid])
 
@@ -71,11 +63,23 @@ def main(mountpoint=None, busid=None, sudomount=False, do_unmount=False, attachw
         if not mountdev.is_block_device():
             raise IOError(f'{mountdev} does not exist or is not a block device')
 
+        created_mountpoint = False
+        if mountpoint.exists():
+            if mountpoint.is_dir():
+                print(f'Warning: mountpoint {mountpoint} already exists but we will be mounting into it')
+            else:
+                raise IOError(f'Mountpoint {moutpoint} exists and is not a directory')
+        else:
+            print(f'Making directory {mountpoint} to be a mountpoint')
+            mountpoint.mkdir()
+            created_mountpoint = True
+
         print("Mounting", mountdev, 'to', mountpoint)
         user_passwd = getpwnam(getuser())
         mountoptions = f'-o uid={user_passwd.pw_uid},gid={user_passwd.pw_gid}'
         check_call(sudomaybe + f'mount {mountoptions} {mountdev} {mountpoint}', shell=True)
-        mounted = mountpoint
+        if mounted is None:
+            mounted = mountpoint
 
     if not mountpoint.is_dir():
         raise IOError(f'Requested mount point {moutpoint} is not a directory')
@@ -85,6 +89,12 @@ def main(mountpoint=None, busid=None, sudomount=False, do_unmount=False, attachw
         copy(uf2path, mountpoint)
     if mounted and do_unmount:
         check_call(sudomaybe + f'umount {mounted}', shell=True)
+
+    if created_mountpoint:
+        try:
+            mountpoint.rmdir()
+        except:
+            pass # We tried 🤷
 
 def parse_usbip_port(usbip_port_output):
     # Example output without sudo:
