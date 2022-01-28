@@ -65,7 +65,9 @@ fn main() -> ! {
     let mut inclick : bool = false;
     let mut clicks = 0;
     let mut lis3mdl_scale : LIS3MDLFullScale = LIS3MDLFullScale::G4;
+    let mut absaccel: bool = true;
     init_lis3mdl(&mut twim, LIS3MDL_ADDR, lis3mdl_scale).expect("lis3mdl init failed");
+
 
     loop {
         usb_dev.poll(&mut [&mut usb_serial]);
@@ -77,12 +79,12 @@ fn main() -> ! {
 
             clicks += 1;
 
-            set_dotstar_color(0., 0., 0., 0., dot_dat, dot_clk);
+            set_dotstar_color(0, 0, 0, 0, dot_dat, dot_clk);
             for _ in 0..clicks {
                 led.set_high().ok();
-                delay.delay_ms(200_u16);
+                delay.delay_ms(50_u16);
                 led.set_low().ok();
-                delay.delay_ms(200_u16);
+                delay.delay_ms(50_u16);
             }
 
             lis3mdl_scale = match clicks % 4 { 0 => LIS3MDLFullScale::G4,
@@ -93,12 +95,16 @@ fn main() -> ! {
             init_lis3mdl(&mut twim, LIS3MDL_ADDR, lis3mdl_scale).expect("lis3mdl scale-set failed");
         
             let wstr = match lis3mdl_scale {
-                LIS3MDLFullScale::G4 => {"4 Gauss Range\n"},
-                LIS3MDLFullScale::G8 => {"8 Gauss Range\n"},
-                LIS3MDLFullScale::G12 => {"12 Gauss Range\n"},
-                LIS3MDLFullScale::G16 => {"16 Gauss Range\n"}
+                LIS3MDLFullScale::G4 => {"4 Gauss Range"},
+                LIS3MDLFullScale::G8 => {"8 Gauss Range"},
+                LIS3MDLFullScale::G12 => {"12 Gauss Range"},
+                LIS3MDLFullScale::G16 => {"16 Gauss Range"}
             };
             usb_serial.write(wstr.as_bytes()).ok();
+
+            absaccel = clicks & 0b100 == 0;  // true for 0-3, false for 4-7, repeat
+            if absaccel { usb_serial.write(" + absolute acceleration".as_bytes()).ok(); }
+            usb_serial.write(b"\r\n").ok();
         }
 
         let mut rd_buffer = [0; 6];
@@ -109,9 +115,9 @@ fn main() -> ! {
                                               LIS3MDLFullScale::G12=>2281.,
                                               LIS3MDLFullScale::G16=>1711.,};
 
-        let x_mag: f32 = (rd_buffer[0] as i16 | (rd_buffer[1] as i16) << 8) as f32 / scale;
-        let y_mag: f32 = (rd_buffer[2] as i16 | (rd_buffer[3] as i16) << 8) as f32 / scale;
-        let z_mag: f32 = (rd_buffer[4] as i16 | (rd_buffer[5] as i16) << 8) as f32 / scale;
+        let x_gauss: f32 = (rd_buffer[0] as i16 | (rd_buffer[1] as i16) << 8) as f32 / scale;
+        let y_gauss: f32 = (rd_buffer[2] as i16 | (rd_buffer[3] as i16) << 8) as f32 / scale;
+        let z_gauss: f32 = (rd_buffer[4] as i16 | (rd_buffer[5] as i16) << 8) as f32 / scale;
 
         let mut buf = [0u8; 64];
         let write_ser = match usb_serial.read(&mut buf[..]) {
@@ -121,25 +127,35 @@ fn main() -> ! {
         };
         if write_ser {
             let mut s: String<1024> = String::new();
-            write!(s, "M-x: {}, y: {}, z: {}\n.,", (x_mag + 16.)/32., (y_mag + 16.)/32., (z_mag + 16.)/32.).expect("Can't write");
+            write!(s, "x: {}, y: {}, z: {} gauss\r\n", x_gauss, y_gauss, z_gauss).expect("Can't write str");
             usb_serial.write(s.as_bytes()).ok();
         }
 
-        set_dotstar_color((x_mag + 16.)/32., (y_mag + 16.)/32., (z_mag + 16.)/32., 0.5, dot_dat, dot_clk);
-
-        //blink_byte(rd_buffer[0], &mut led, &mut delay);
-        //dotstar_byte(rd_buffer[0], 0.05, dot_dat, dot_clk, &mut delay);
-        //delay.delay_ms(1000_u16);
+        
+                                              
+        let maxgauss: f32 = match lis3mdl_scale {
+            LIS3MDLFullScale::G4=>4.,
+            LIS3MDLFullScale::G8=>8.,
+            LIS3MDLFullScale::G12=>12.,
+            LIS3MDLFullScale::G16=>16. };
+        if absaccel {
+            set_dotstar_color((255. * floatabs(x_gauss) / maxgauss) as u8, 
+                              (255. * floatabs(y_gauss) / maxgauss) as u8, 
+                              (255. * floatabs(z_gauss) / maxgauss) as u8,
+                              16, dot_dat, dot_clk);
+        } else {
+            set_dotstar_color((255. * (x_gauss + maxgauss) / (maxgauss*2.)) as u8, 
+                              (255. * (y_gauss + maxgauss) / (maxgauss*2.)) as u8, 
+                              (255. * (z_gauss + maxgauss) / (maxgauss*2.)) as u8,
+                              16, dot_dat, dot_clk);
+        }
     }
 }
 
 
-fn set_dotstar_color(r:f32, g:f32, b:f32, brightness:f32, 
+fn set_dotstar_color(rbyte:u8, gbyte:u8, bbyte:u8, brightness:u8, 
     dat: &mut Pin<Output<PushPull>>, clk: &mut Pin<Output<PushPull>>) {
-    let rbyte = (r * 255.) as u8;
-    let gbyte = (g * 255.) as u8;
-    let bbyte = (b * 255.) as u8;
-    let firstbyte = ((brightness * 31.) as u8) + 0b1110000;
+    let firstbyte = brightness | 0b11100000;  // anything > 31 is effectively treated as max
     
     let txbuffer = [0, 0, 0, 0,
                     firstbyte, bbyte, gbyte, rbyte,
@@ -158,27 +174,13 @@ fn set_dotstar_color(r:f32, g:f32, b:f32, brightness:f32,
             } else {
                 dat.set_high().ok();
             }
+            cortex_m::asm::delay(3_u32);
             clk.set_high().ok();
+            cortex_m::asm::delay(3_u32);
         }
     }
     clk.set_low().ok();
 }
-
-
-// fn dotstar_byte(val: u8, brightness: f32,
-//                 dat: &mut Pin<Output<PushPull>>, clk: &mut Pin<Output<PushPull>>, 
-//                 delay: &mut hal::Delay) {
-//     for i in 0..8 {
-//         if (val << i & 0b10000000) == 0 {
-//             set_dotstar_color(1., 0., 0.1, brightness, dat, clk);
-//         } else {
-//             set_dotstar_color(0., 1., 0.1, brightness, dat, clk);
-//         }
-//         delay.delay_ms(300_u16);
-//         set_dotstar_color(0., 0., 0., 0., dat, clk);
-//         delay.delay_ms(300_u16);
-//     }
-// }
 
 #[derive(Clone, Copy)]
 enum LIS3MDLFullScale {
@@ -205,24 +207,7 @@ fn init_lis3mdl<T: hal::twim::Instance>(twim: &mut Twim<T>, addr: u8,
     twim.write(addr, &init_buffer)
 }
 
-
-// use core::panic::PanicInfo;
-// //use core::sync::atomic::{self, Ordering};
-// #[inline(never)]
-// #[panic_handler]
-// fn panic(_info: &PanicInfo) -> ! {
-//     let p = hal::pac::Peripherals::take().unwrap();
-//     let port0 = hal::gpio::p0::Parts::new(p.P0);
-//     let port1 = hal::gpio::p1::Parts::new(p.P1);
-//     let dot_dat: &mut Pin<Output<PushPull>> = &mut port0.p0_08.into_push_pull_output(Level::Low).degrade();
-//     let dot_clk: &mut Pin<Output<PushPull>> = &mut port1.p1_09.into_push_pull_output(Level::Low).degrade();
-    
-//     set_dotstar_color(1., 0., 0., 0.5, dot_dat, dot_clk);
-
-//     loop {
-//         for i in 0..31 {
-//             set_dotstar_color(1., 0., 0., (i as f32)/31., dot_dat, dot_clk);
-//             cortex_m::asm::delay(64_000_000/31 as u32);
-//         }
-//     }
-// }
+fn floatabs(f:f32) -> f32{
+    const LOWER_31_BITS : u32 = 0x7fffffff;
+    f32::from_bits(f.to_bits() & LOWER_31_BITS)
+}
