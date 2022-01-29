@@ -20,25 +20,22 @@ from subprocess import check_call, check_output, run, TimeoutExpired
 
 import make_uf2
 
-import mcpgpio
-try:
-    gpio_dev = mcpgpio.init()
-    mcpgpio.gpios_input(gpio_dev)
-except:
-    gpio_dev = None
-def gpio_toggle_reset(waittime=0.1):
-    mcpgpio.gpios_output(gpio_dev, 0)
-    time.sleep(waittime/2)
-    mcpgpio.gpios_input(gpio_dev)
-    time.sleep(waittime/2)
+from gpio_interface import gpio_toggle_reset, gpio_init
 
 class NoMatchingDriveError(IOError):
     pass
 
 def main(mountpoint=None, busid=None, sudo=False, do_unmount=False,
-         attach_timeout=15, reset=False, gpio_bootloader=False,
+         attach_timeout=10, reset=False, gpio_bootloader=False,
          reattach_after_reset=0, flashing_timeout=30):
     sudomaybe = 'sudo ' if sudo else ''
+    if gpio_bootloader or reset:
+        try:
+            gpio_init()
+        except Exception as e:
+            print(f'Failed to initialize GPIO: "{e}". Skipping activities '
+                  f'requiring reset pin.')
+            gpio_bootloader = reset = False
 
     if gpio_bootloader:
         gpio_toggle_reset(0.2)
@@ -236,7 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--mountpoint', default=None)
     parser.add_argument('-s', '--sudo', action='store_true')
     parser.add_argument('--no-unmount', action='store_true')
-    parser.add_argument('-w', '--attach-timeout', type=float, default=15)
+    parser.add_argument('-w', '--attach-timeout', type=float, default=10)
     parser.add_argument('-g', '--gpio-bootloader', type=float, default=0, help='the amount of time to wait after double-resetting to let bootloader boot, or 0 to skip')
     parser.add_argument('-r', '--reset', type=float, default=0, help='the amount of time to wait after flashing is completed to reset the board, or 0 to skip.')
     parser.add_argument('--reattach-after-reset', type=float, default=0, help='the amount of time to wait before trying to re-attach the busnumber after reset, or 0 to skip')
