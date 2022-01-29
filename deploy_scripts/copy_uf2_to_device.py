@@ -32,9 +32,12 @@ def gpio_toggle_reset(waittime=0.1):
     mcpgpio.gpios_input(gpio_dev)
     time.sleep(waittime/2)
 
+class NoMatchingDriveError(IOError):
+    pass
 
 def main(mountpoint=None, busid=None, sudo=False, do_unmount=False,
-         attach_timeout=15, reset=False, gpio_bootloader=False):
+         attach_timeout=15, reset=False, gpio_bootloader=False,
+         reattach_after_reset=0, flashing_timeout=30):
     sudomaybe = 'sudo ' if sudo else ''
 
     if gpio_bootloader:
@@ -75,23 +78,24 @@ def main(mountpoint=None, busid=None, sudo=False, do_unmount=False,
                 if attach_compproc.returncode != 0:
                     raise ValueError('usbipd could not attach (see above)')
 
-                print (f'Waiting up to {attach_timeout} seconds for local machine to catch up to attach')
-
-                # Now we run usbip port until its output changes from before the attach.
-                # This may hang for a few seconds while usbipd does its magic, but if it's too long we may be stuck.
-                port_output = pre_port_output
-                t0 = time.time()
-                while port_output == pre_port_output:
-                    dt = time.time() - t0
-                    if dt > attach_timeout:
-                        raise TimeoutExpired(f"usbip port never updated despite waiting {attach_timeout}")
-                    port_output = run('usbip port'.split(' '), capture_output=True,
-                                    check=True,  text=True,
-                                    timeout=attach_timeout - dt).stdout
-
-            remote_busid_to_pidvid = parse_usbip_port(port_output)
-
-            usbdrivename = find_drivedevname_from_pidvid(remote_busid_to_pidvid[busid])
+            print(f"Waiting up to {attach_timeout} seconds for drive to appear")
+            t0 = time.time()
+            while (time.time() - t0) < attach_timeout:
+                retproc = run('usbip port'.split(' '), capture_output=True,
+                                text=True, timeout=attach_timeout - time.time() + t0)
+                if retproc.returncode == 0:
+                    remote_busid_to_pidvid = parse_usbip_port(retproc.stdout)
+                    try:
+                        usbdrivename = find_drivedevname_from_pidvid(remote_busid_to_pidvid[busid])
+                        break
+                    # KeyError means the busid didn't show up in usbip port
+                    except (NoMatchingDriveError, KeyError):
+                        pass
+                # lets not overwhelm the poort computer, only do the loop above ~20 times at most
+                time.sleep(attach_timeout/20)
+            else:
+                raise NoMatchingDriveError(f'never got a /dev/sd* drive that '
+                                           f'is attached to the busid {busid}')
 
             mountdev = Path(f'/dev/{usbdrivename}')
             if not mountdev.is_block_device():
@@ -119,21 +123,35 @@ def main(mountpoint=None, busid=None, sudo=False, do_unmount=False,
         else:
             if not list(mountpoint.glob('CURRENT.UF2')):
                 raise IOError(f'drive {mountdev} is mountable, but does not look like a UF2 drive')
+
+            print(f'Copying {uf2path} to the board')
             copy(uf2path, mountpoint)
-            print(f'Copied {uf2path} to the board!')
+
+            t0 = time.time()
+            while time.time() - t0 < flashing_timeout:
+                if not mountdev.is_block_device():
+                    print(f"{mountdev} is gone, flashing seems to be complete.")
+                    break
+            else:
+                raise IOError(f'Drive is still there after {flashing_timeout}, did the flash actually succeed?')
+
             if reset:
                 time.sleep(reset)
+                print("Resetting board")
                 gpio_toggle_reset()
-                if reattach_after_reset:
+                if reattach_after_reset and in_wsl:
+                    print(f"Reattaching {busid}")
                     time.sleep(reattach_after_reset)
                     run(f'usbipd.exe wsl attach -b {busid}', shell=True, check=True)
     finally:
         if mounted and do_unmount:
+            print(f"unmounting {mounted}")
             check_call(sudomaybe + f'umount {mounted}', shell=True)
 
         if created_mountpoint:
             try:
                 mountpoint.rmdir()
+                print(f"Removed {mountpoint}")
             except:
                 pass # We tried 🤷
 
@@ -203,7 +221,7 @@ def find_drivedevname_from_pidvid(pidvid):
                     if pid == pid_tofind and vid == vid_tofind:
                         to_return.append(drive.stem)
     if len(to_return) == 0:
-        raise IOError(f'no sd* drive matches the ids {pidvid}')
+        raise NoMatchingDriveError(f'no sd* drive matches the ids {pidvid}')
     elif len(to_return) > 1:
         raise IOError(f'found multiple drives: {to_return} matching USB device '
                       f'{pidvid} - do not know which one to pick!')
@@ -219,9 +237,11 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--sudo', action='store_true')
     parser.add_argument('--no-unmount', action='store_true')
     parser.add_argument('-w', '--attach-timeout', type=float, default=15)
-    parser.add_argument('-g', '--gpio-bootloader', type=float, default=0, description='the amount of time to wait after double-resetting to let bootloader boot, or 0 to skip')
-    parser.add_argument('-r', '--reset', type=float, default=0, description='the amount of time to wait before a reset occurs at the end, or 0 to skip')
-    parser.add_argument('--reattach-after-reset', type=float, default=0, description='the amount of time to wait before trying to re-attach the busnumber after reset, or 0 to skip')
+    parser.add_argument('-g', '--gpio-bootloader', type=float, default=0, help='the amount of time to wait after double-resetting to let bootloader boot, or 0 to skip')
+    parser.add_argument('-r', '--reset', type=float, default=0, help='the amount of time to wait after flashing is completed to reset the board, or 0 to skip.')
+    parser.add_argument('--reattach-after-reset', type=float, default=0, help='the amount of time to wait before trying to re-attach the busnumber after reset, or 0 to skip')
+    parser.add_argument('-t', '--flashing-timeout', type=float, default=30, help='the maximum amount of time to wait for flashing to complete')
+    parser.add_argument('--debug', action='store_true')
 
     args = parser.parse_args()
 
@@ -234,7 +254,11 @@ if __name__ == '__main__':
              sudo=args.sudo, do_unmount=not args.no_unmount,
              attach_timeout=args.attach_timeout, reset=args.reset,
              gpio_bootloader=args.gpio_bootloader,
-             reattach_after_reset=args.reattach_after_reset)
+             reattach_after_reset=args.reattach_after_reset,
+             flashing_timeout=args.flashing_timeout)
     except Exception as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+        if args.debug:
+            raise
+        else:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
