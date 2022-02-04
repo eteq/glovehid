@@ -16,3 +16,8 @@ def gpio_toggle_reset(hold_time=0.1):
     time.sleep(hold_time/2)
     mcpgpio.gpios_input(gpio_dev[0])
     time.sleep(hold_time/2)
+
+if __name__ == '__main__':
+    gpio_init()
+    print("gpio inited, performing device reset")
+    gpio_toggle_reset()
