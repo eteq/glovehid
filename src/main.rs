@@ -34,11 +34,6 @@ fn main() -> ! {
     let mut delay = hal::Delay::new(core.SYST);
 
     let mut led = port0.p0_06.into_push_pull_output(Level::Low).degrade();
-    
-    let dot_dat: &mut Pin<Output<PushPull>> = &mut port0.p0_08.into_push_pull_output(Level::Low).degrade();
-    let dot_clk: &mut Pin<Output<PushPull>> = &mut port1.p1_09.into_push_pull_output(Level::Low).degrade();
-    
-    let sw2 = port0.p0_29.into_pullup_input();
 
     // Set up uart on the regular tx/rx labeled pins
     let (uart0, uart_pins) = {
@@ -59,7 +54,6 @@ fn main() -> ! {
         hal::uarte::Baudrate::BAUD115200,
     );
 
-    write!(uarte, "Started glovehid!\r\n"); 
     // Check if there was a panic message, if so, send to UART
     if let Some(msg) = panic_persist::get_panic_message_utf8() {
         write!(uarte, "There was a panic last boot, reset to clear:\r\n"); 
@@ -71,7 +65,12 @@ fn main() -> ! {
             delay.delay_ms(50_u8);
         }
     }
+    
 
+    let dot_dat: &mut Pin<Output<PushPull>> = &mut port0.p0_08.into_push_pull_output(Level::Low).degrade();
+    let dot_clk: &mut Pin<Output<PushPull>> = &mut port1.p1_09.into_push_pull_output(Level::Low).degrade();
+    
+    let sw2 = port0.p0_29.into_pullup_input();
 
     // set up the i2c bus
     let scl = port0.p0_14.into_floating_input().degrade();
@@ -85,8 +84,10 @@ fn main() -> ! {
 
     let mpu_accel_scale = MPU6050AccelScale::G4; 
     let mpu_gyro_scale = MPU6050GyroScale::DPS500; 
+
+    write!(uarte, "Starting init for glovehid!\r\n"); 
     
-    init_mpu6050(&mut twim, MPU6050_ADDR1, mpu_accel_scale, mpu_gyro_scale).expect("mpu6050 init failed");
+    init_mpu6050(&mut twim, MPU6050_ADDR1, mpu_accel_scale, mpu_gyro_scale, &mut delay).expect("mpu6050 init failed");
     
     delay.delay_ms(100_u16); // let the thing catch up
 
@@ -99,14 +100,24 @@ fn main() -> ! {
             fifo_dump_to_data_mpu6050(fifo_dump,  mpu_accel_scale, mpu_gyro_scale)
         };
         
-        
-        write!(uarte, "acceldump done, n={}\r\n", xaccel.len());
-        
         if xaccel.len() > 0 {
-            set_dotstar_color((255.*floatabs(xaccel.pop().unwrap())/4.0) as u8,
-                            (255.*floatabs(yaccel.pop().unwrap())/4.0) as u8, 
-                            (255.*floatabs(zaccel.pop().unwrap())/4.0) as u8, 
+            let xa = xaccel.pop().unwrap();
+            let ya = yaccel.pop().unwrap();
+            let za = zaccel.pop().unwrap();
+            let xg = xgyro.pop().unwrap();
+            let yg = ygyro.pop().unwrap();
+            let zg = zgyro.pop().unwrap();
+            if i % 20 == 0 {  
+                write!(uarte, "accel:{},{},{} ; ", xa, ya, za); 
+                write!(uarte, "gyro:{},{},{}\r\n", xg, yg, zg); 
+            }
+
+            set_dotstar_color((255.*floatabs(xa)/4.0) as u8,
+                            (255.*floatabs(ya)/4.0) as u8, 
+                            (255.*floatabs(za)/4.0) as u8, 
                             16, dot_dat, dot_clk);
+        } else {
+            panic!("dump=0");
         }
         i +=1 ;
     }
@@ -173,7 +184,8 @@ impl MPU6050GyroScale {
 
 fn init_mpu6050<T: hal::twim::Instance>(twim: &mut Twim<T>, addr: u8,
                                         ascale: MPU6050AccelScale,
-                                        gscale: MPU6050GyroScale)
+                                        gscale: MPU6050GyroScale,
+                                        delay: &mut hal::Delay)
                                         -> Result<(), hal::twim::Error> {
     let gscale_reg27 : u8  = match gscale {
         MPU6050GyroScale::DPS250 => 0b00000000,
@@ -197,30 +209,42 @@ fn init_mpu6050<T: hal::twim::Instance>(twim: &mut Twim<T>, addr: u8,
     }
     
 
-    // // reset the device, wait for the reset bit to clear
-    // let reset_buffer = [107, 0b10000000];
-    // twim.write(addr, &reset_buffer)?;
-    // while reset_buffer[1] & 0b1000000 != 0 {
-    //     let mut read_buffer = [1_u8];
-    //     twim.write_then_read(addr, &reset_buffer[0..1], &mut read_buffer)?;
-    // }
-    // This makes it not work for unclear reasons.  Maybe a wait is required?  But don't really care
+    // reset the device
+    let reset_steps = [107, 0b10000000,
+                        106, 0b00000001, // unclear if this is needed but probably doesn't hurt?
+                        68, 0b00000111];
+    for i in (0..reset_steps.len()).step_by(2) {
+        twim.write(addr, &reset_steps[i..i+2])?;
+        delay.delay_ms(100_u16); // suggested by pg41 of register map
+    }
+
 
     // these are all register, setting pairs, so should be written 2-at-a-time 
-    let init_buffer = [26, 0b00000001, //CONFIG -> 184 Hz bandwidth, Fs = 1khz for everything
+    let init_buffer = [107, 0b00000001, //PWR_MGMT_1 -> power on, x-gyro-axis as clock source
+                       108, 0b00000000, //PWR_MGMT_2 -> defaults all 0 already
+                       26, 0b00000001, //CONFIG -> 184 Hz bandwidth, Fs = 1khz for everything
                        // Desired sample rate is 200 Hz.  According to register map, SR = Gyro_rate / (1+SMPLRT_DIV), and gyro rate = 1000, so:
                        25, 4, //SMPRT_DIV 
                        27, gscale_reg27, //GYRO_CONFIG
                        28, ascale_reg28, //ACCEL_CONFIG
                        35, 0b01111000, //FIFO_EN -> xg,yg,zg,accel
                        106, 0b01000000, //USER_CTRL -> FIFO_EN
-                       107, 0b00000001, //PWR_MGMT_1 -> power on, x-gyro-axis as clock source
-                       //108, 0b00000000, //PWR_MGMT_2 -> defaults all 0 already
                        ];
                        
     for i in (0..init_buffer.len()).step_by(2) {
         twim.write(addr, &init_buffer[i..i+2])?;
     }
+    delay.delay_ms(30_u8);  // gyro settle time according to datasheet
+
+    // verify all registers are set to what htey should be
+    for i in (0..init_buffer.len()).step_by(2) {
+        let mut rbuff = [255_u8; 1];
+        twim.write_then_read(addr, & [init_buffer[i]], &mut rbuff).expect("verify failed");
+        if rbuff[0] != init_buffer[i+1] {
+            panic!("Register {} mismatch!: {:#010b} != {:#010b}", init_buffer[i], init_buffer[i+1], rbuff[0]);
+        }
+    }
+
     Ok(())
 }
 
@@ -233,18 +257,25 @@ fn reset_fifo_mpu6050<T: hal::twim::Instance>(twim: &mut Twim<T>, addr: u8)
 fn dump_fifo_mpu6050<T: hal::twim::Instance>(twim: &mut Twim<T>, addr: u8)
                                              -> Result<Vec<u8, 1024>, hal::twim::Error>  {
     // Note this only dumps multiples of 12.  But if the FIFO is full, it will clear it to make sure we start the sequence again in the right place.
-    let register_addresses = [114, 116];  // FIFO_COUNTH, FIFO_RW
-    let mut count_buffer = [0_u8; 2];
-    twim.write_then_read(addr, &register_addresses[0..1], &mut count_buffer)?;
-    let counts : u16 = count_buffer[1] as u16 + (count_buffer[0] as u16) << 8;
+    let fifo_regs = [114, 115, 116];
+
+    // do the counts as 2 reads, as the datasheet kind of implies
+    let mut counth = [255_u8; 1];
+    twim.write_then_read(addr, &fifo_regs[0..1], &mut counth).expect("count high read failed");
+    let mut countl = [255_u8; 1];
+    twim.write_then_read(addr, &fifo_regs[1..2], &mut countl).expect("count low read failed");
+    let counts: u16 = countl[0] as u16 | ((counth[0] as u16) << 8);
+    if counts > 1024 {
+        panic!("fifo in impossible state of > 1024: {}, {:#010b}, {:#010b}", counts, counth[0], countl[0]);
+    }
     let reads = counts/12;
 
     // vector that's as big as the FIFO can be
     let mut fifo_output: Vec<u8, 1024> = Vec::new();
 
-    let mut rd_buffer = [0_u8; 12];
+    let mut rd_buffer = [255_u8; 12];
     for _ in 0..reads {
-        twim.write_then_read(addr, &register_addresses[1..2], &mut rd_buffer)?;
+        twim.write_then_read(addr, &fifo_regs[2..3], &mut rd_buffer).expect("fifo read failed");
         for read in rd_buffer {
             fifo_output.push(read).expect("vector full, but this should be impossible unless FIFO broken");
         }
@@ -252,12 +283,12 @@ fn dump_fifo_mpu6050<T: hal::twim::Instance>(twim: &mut Twim<T>, addr: u8)
 
     if counts == 1024 {
         // the fifo is out-of-sync with the length-12 streams, so clear it now
-        reset_fifo_mpu6050(twim, addr)?;
+        reset_fifo_mpu6050(twim, addr).expect("fifo reset failed");
     }
     return Ok(fifo_output)
 }
 
-fn fifo_dump_to_data_mpu6050(mut fifo_output: Vec<u8, 1024>, 
+fn fifo_dump_to_data_mpu6050(fifo_output: Vec<u8, 1024>, 
                              accel_scale: MPU6050AccelScale, 
                              gyro_scale: MPU6050GyroScale) 
                              -> (Vec<f32, 85>, Vec<f32, 85>, Vec<f32, 85>, Vec<f32, 85>, Vec<f32, 85>, Vec<f32, 85>) {
