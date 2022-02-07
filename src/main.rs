@@ -56,8 +56,8 @@ fn main() -> ! {
 
     // Check if there was a panic message, if so, send to UART
     if let Some(msg) = panic_persist::get_panic_message_utf8() {
-        write!(uarte, "There was a panic last boot, reset to clear:\r\n"); 
-        write!(uarte, "{}\r\n", msg); 
+        write!(uarte, "There was a panic last boot, reset to clear:\r\n").ok(); 
+        write!(uarte, "{}\r\n", msg).ok(); 
         loop {
             led.set_high().ok();
             delay.delay_ms(50_u8);
@@ -85,7 +85,7 @@ fn main() -> ! {
     let mpu_accel_scale = MPU6050AccelScale::G4; 
     let mpu_gyro_scale = MPU6050GyroScale::DPS500; 
 
-    write!(uarte, "Starting init for glovehid!\r\n"); 
+    write!(uarte, "Starting init for glovehid!\r\n").ok(); 
     
     init_mpu6050(&mut twim, MPU6050_ADDR1, mpu_accel_scale, mpu_gyro_scale, &mut delay).expect("mpu6050 init failed");
     
@@ -108,8 +108,8 @@ fn main() -> ! {
             let yg = ygyro.pop().unwrap();
             let zg = zgyro.pop().unwrap();
             if i % 20 == 0 {  
-                write!(uarte, "accel:{},{},{} ; ", xa, ya, za); 
-                write!(uarte, "gyro:{},{},{}\r\n", xg, yg, zg); 
+                write!(uarte, "accel:{},{},{} ; ", xa, ya, za).ok(); 
+                write!(uarte, "gyro:{},{},{}\r\n", xg, yg, zg).ok(); 
             }
 
             set_dotstar_color((255.*floatabs(xa)/4.0) as u8,
@@ -152,6 +152,7 @@ fn set_dotstar_color(rbyte:u8, gbyte:u8, bbyte:u8, brightness:u8,
     clk.set_low().ok();
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum MPU6050AccelScale {
     G2, G4, G8, G16 
@@ -167,6 +168,7 @@ impl MPU6050AccelScale {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum MPU6050GyroScale {
     DPS250, DPS500, DPS1000, DPS2000 
